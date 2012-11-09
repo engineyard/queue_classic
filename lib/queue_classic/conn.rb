@@ -1,6 +1,60 @@
 module QC
+  class Connections
+
+    def connections
+      unless @connections
+        @connections = Array.new
+      end
+      @connections
+    end
+
+    def connections_mutex
+      unless @connections_mutex
+        @connections_mutex = Mutex.new
+      end
+      @connections_mutex
+    end
+
+    def get_connection
+      acquired_connection = nil
+      connections_mutex.synchronize do
+        open_connections = connections.select {|c|
+          c.mon_try_enter == true}
+        if open_connections.length > 0
+          acquired_connection = open_connections.at(0)
+        else
+          connections << QC::Conn.connect
+          acquired_connection = connections.last
+          acquired_connection.extend(MonitorMixin)
+        end
+        acquired_connection.mon_enter
+      end
+      acquired_connection
+    end
+
+    #def get_connection
+    #  acquired_connection = nil
+    #  self.synchronize do
+    #    if self[Thread.current[:qc_conn_id]].nil?
+    #      Thread.current[:qc_conn_id] = UUIDTools::UUID.random_create.to_str
+    #      self[Thread.current[:qc_conn_id]] = QC::Conn.connect
+    #      puts "#{self.length} QUEUE CLASSIC CONNECTIONS FOR PID #{Process.pid}"
+    #    end
+    #    acquired_connection = self[Thread.current[:qc_conn_id]]
+    #  end
+    #  return acquired_connection
+    #end
+  end
+
   module Conn
     extend self
+
+    def connections
+      unless @connections
+        @connections = QC::Connections.new
+      end
+      @connections
+    end
 
     def execute(stmt, *params)
       log(:level => :debug, :action => "exec_sql", :sql => stmt.inspect)
@@ -60,11 +114,13 @@ module QC
     end
 
     def connection
-      @connection ||= connect
+      @connection = connections.get_connection
+      #@connection ||= connect
     end
 
     def disconnect
       connection.finish
+      connection.mon_exit
     ensure
       @connection = nil
     end
@@ -79,9 +135,14 @@ module QC
         db_url.user,
         db_url.password
       )
+      schema  = db_url.query.to_s.split('&').detect { |k| k.match /schema=/ }.to_s.sub(/.*=/,'')
+
       if conn.status != PGconn::CONNECTION_OK
         log(:level => :error, :message => conn.error)
       end
+
+      conn.exec("SET search_path TO #{schema}") unless schema.nil? || schema == ""
+
       conn
     end
 

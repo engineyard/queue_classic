@@ -1,6 +1,7 @@
 require "scrolls"
 require "pg"
 require "uri"
+require "uuidtools"
 
 require "queue_classic/okjson"
 require "queue_classic/conn"

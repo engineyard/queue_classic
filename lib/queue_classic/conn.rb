@@ -1,37 +1,70 @@
 module QC
   class Connections
+    attr_reader :connections, :connections_mutex
 
-    def connections
-      unless @connections
-        @connections = Array.new
-      end
-      @connections
-    end
-
-    def connections_mutex
-      unless @connections_mutex
-        @connections_mutex = Mutex.new
-      end
-      @connections_mutex
+    def initialize
+      @connections = Array.new
+      @connections_mutex = Mutex.new
     end
 
     def get_connection
       acquired_connection = nil
       connections_mutex.synchronize do
+        found = false
+        # Ensure each thread has an id
+        if Thread.current[:thread_id].nil?
+          Thread.current[:thread_id] = UUIDTools::UUID.random_create.to_str
+        end
+        # If this thread already has an open connection, get it
         open_connections = connections.select {|c|
-          c.mon_try_enter == true}
+          c.thread_id == Thread.current[:thread_id]}
         if open_connections.length > 0
           acquired_connection = open_connections.at(0)
+          acquired_connection.mutex.lock unless acquired_connection.mutex.locked?
         else
-          connections << QC::Conn.connect
-          acquired_connection = connections.last
-          acquired_connection.extend(MonitorMixin)
+          # If no open connection exists for this thread, find or create one
+          connections.each do |connection|
+            if (!found && connection.mutex.try_lock)
+              acquired_connection = connection
+              found = true
+            end
+          end
+          if acquired_connection.nil?
+            connections << QC::Conn.connect
+            connections.last.define_singleton_method(:mutex) do
+              unless @mutex
+                @mutex = Mutex.new
+              end
+              @mutex
+            end
+            connections.last.define_singleton_method(:thread_id) do
+              unless @thread_id
+                @thread_id = nil
+              end
+              @thread_id
+            end
+            connections.last.define_singleton_method(:thread_id=) do |val|
+              @thread_id = val
+            end
+            acquired_connection = connections.last
+            acquired_connection.mutex.lock
+          end
+          acquired_connection.thread_id = Thread.current[:thread_id]
         end
-        acquired_connection.mon_enter
       end
       acquired_connection
     end
 
+    def cleanup
+      connections_mutex.synchronize do
+        connections.select {|c|
+          c.thread_id == Thread.current[:thread_id]}.each do |conn|
+            conn.mutex.unlock if conn.mutex.locked?
+            conn.close
+            connections.delete(conn)
+        end
+      end
+    end
     #def get_connection
     #  acquired_connection = nil
     #  self.synchronize do
@@ -47,6 +80,7 @@ module QC
   end
 
   module Conn
+
     extend self
 
     def connections
@@ -114,15 +148,21 @@ module QC
     end
 
     def connection
-      @connection = connections.get_connection
+      connections.get_connection
       #@connection ||= connect
+    end
+
+    def finish
+      connection.mutex.unlock
+    end
+
+    def cleanup
+      connections.cleanup
     end
 
     def disconnect
       connection.finish
-      connection.mon_exit
-    ensure
-      @connection = nil
+      connection.mutex.unlock
     end
 
     def connect

@@ -12,13 +12,14 @@ module QC
 
     def lock_head(q_name, top_bound)
       s = "SELECT * FROM lock_head($1, $2)"
+      retval = nil
       if r = Conn.execute(s, q_name, top_bound)
-        {
-          :id     => r["id"],
-          :method => r["method"],
-          :args   => OkJson.decode(r["args"])
+        retval = {:id     => r["id"],
+                  :method => r["method"],
+                  :args   => OkJson.decode(r["args"])
         }
       end
+      retval
     end
 
     def count(q_name=nil)

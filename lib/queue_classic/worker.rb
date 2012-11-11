@@ -93,6 +93,7 @@ module QC
             handle_failure(job, e)
           ensure
             @queue.delete(job[:id])
+            QC::Conn.destroy
             log(:level => :debug, :action => "delete_job", :job => job[:id])
           end
         end

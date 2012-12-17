@@ -8,62 +8,62 @@ module QC
     end
 
     def get_connection
+      # If the connection has already been created for this thread,
+      # just return it without locking.
       acquired_connection = nil
-      connections_mutex.synchronize do
-        found = false
+      found_connections = connections.select {|c|
+        c[:thread_id] == Thread.current[:thread_id] &&
+        c[:thread].nil? == false &&
+        c[:thread].status.nil? == false &&
+        c[:thread].status != false}
+
+      if found_connections.length > 0
+        acquired_connection = found_connections.at(0)[:connection]
+      else
+        # If we're at this point, we have not yet secured an open connection.  Open
+        # one.
+
         # Ensure each thread has an id
         if Thread.current[:thread_id].nil?
           Thread.current[:thread_id] = UUIDTools::UUID.random_create.to_str
         end
-        # If this thread already has an open connection, get it
-        open_connections = connections.select {|c|
-          c.thread_id == Thread.current[:thread_id]}
-        if open_connections.length > 0
-          acquired_connection = open_connections.at(0)
-          acquired_connection.mutex.lock unless acquired_connection.mutex.locked?
-        else
-          # If no open connection exists for this thread, find or create one
-          connections.each do |connection|
-            if (!found && connection.mutex.try_lock)
-              acquired_connection = connection
-              found = true
-            end
+        # Snag or allocate the connection in the connections array
+        connections_mutex.synchronize do
+          i = @connections.rindex {|conn| conn[:thread].nil? || conn[:thread].status.nil? ||
+                                          conn[:thread].status == false}
+          if i.nil?
+            new_connection = {:thread_id => Thread.current[:thread_id],
+                              :thread => Thread.current,
+                              :connection => QC::Conn.connect}
+            connections << new_connection
+            acquired_connection = new_connection[:connection]
+          else
+            # If the thread in this spot in the array is finished with this connection,
+            # give it to another thread.
+            #connections[i][:connection].close
+            #connections[i] = {:thread_id => Thread.current[:thread_id],
+            #                  :thread => Thread.current,
+            #                  :connection => QC::Conn.connect}
+            connections[i][:thread_id] = Thread.current[:thread_id]
+            connections[i][:thread] = Thread.current
+            acquired_connection = connections[i][:connection]
           end
-          if acquired_connection.nil?
-            connections << QC::Conn.connect
-            connections.last.define_singleton_method(:mutex) do
-              unless @mutex
-                @mutex = Mutex.new
-              end
-              @mutex
-            end
-            connections.last.define_singleton_method(:thread_id) do
-              unless @thread_id
-                @thread_id = nil
-              end
-              @thread_id
-            end
-            connections.last.define_singleton_method(:thread_id=) do |val|
-              @thread_id = val
-            end
-            acquired_connection = connections.last
-            acquired_connection.mutex.lock
-          end
-          acquired_connection.thread_id = Thread.current[:thread_id]
+
         end
       end
+      # Return the connection that is specific for the thread
       acquired_connection
     end
 
     def cleanup
-      connections_mutex.synchronize do
-        connections.select {|c|
-          c.thread_id == Thread.current[:thread_id]}.each do |conn|
-            conn.mutex.unlock if conn.mutex.locked?
-            conn.close
-            connections.delete(conn)
-        end
-      end
+      #connections_mutex.synchronize do
+      #  connections.select {|c|
+      #    c.thread_id == Thread.current[:thread_id]}.each do |conn|
+      #      conn.mutex.unlock if conn.mutex.locked?
+      #      conn.close
+      #      connections.delete(conn)
+      #  end
+      #end
     end
     #def get_connection
     #  acquired_connection = nil
@@ -153,16 +153,16 @@ module QC
     end
 
     def finish
-      connection.mutex.unlock
+      #connection.mutex.unlock
     end
 
     def cleanup
-      connections.cleanup
+      #connections.cleanup
     end
 
     def disconnect
       connection.finish
-      connection.mutex.unlock
+      #connection.mutex.unlock
     end
 
     def connect

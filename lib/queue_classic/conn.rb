@@ -8,75 +8,55 @@ module QC
     end
 
     def get_connection
-      # If the connection has already been created for this thread,
-      # just return it without locking.
       acquired_connection = nil
       found_connections = connections.select {|c|
-        c[:thread_id] == Thread.current[:thread_id] &&
-        c[:thread].nil? == false &&
-        c[:thread].status.nil? == false &&
-        c[:thread].status != false}
-
+        c.owner_thread.object_id == Thread.current.object_id &&
+        c.finished? == false
+      }
       if found_connections.length > 0
-        acquired_connection = found_connections.at(0)[:connection]
+        acquired_connection = found_connections.at(0)
       else
-        # If we're at this point, we have not yet secured an open connection.  Open
-        # one.
+        acquired_connection = QC::Conn.connect
+        add_connection_instance_property acquired_connection, 'owner_thread'
+        acquired_connection.owner_thread = Thread.current
 
-        # Ensure each thread has an id
-        if Thread.current[:thread_id].nil?
-          Thread.current[:thread_id] = UUIDTools::UUID.random_create.to_str
-        end
-        # Snag or allocate the connection in the connections array
-        connections_mutex.synchronize do
-          i = @connections.rindex {|conn| conn[:thread].nil? || conn[:thread].status.nil? ||
-                                          conn[:thread].status == false}
+        @connections_mutex.synchronize do
+          i = connections.rindex {|conn| conn.owner_thread.nil? ||
+                                         conn.owner_thread.status.nil? ||
+                                         conn.owner_thread.status == false ||
+                                         conn.finished? == true}
           if i.nil?
-            new_connection = {:thread_id => Thread.current[:thread_id],
-                              :thread => Thread.current,
-                              :connection => QC::Conn.connect}
-            connections << new_connection
-            acquired_connection = new_connection[:connection]
+            connections << acquired_connection
           else
-            # If the thread in this spot in the array is finished with this connection,
-            # give it to another thread.
-            #connections[i][:connection].close
-            #connections[i] = {:thread_id => Thread.current[:thread_id],
-            #                  :thread => Thread.current,
-            #                  :connection => QC::Conn.connect}
-            connections[i][:thread_id] = Thread.current[:thread_id]
-            connections[i][:thread] = Thread.current
-            acquired_connection = connections[i][:connection]
+            if connections[i].finished? == false
+              connections[i].finish
+            end
+            connections[i] = acquired_connection
           end
-
         end
       end
-      # Return the connection that is specific for the thread
       acquired_connection
     end
 
     def cleanup
-      #connections_mutex.synchronize do
-      #  connections.select {|c|
-      #    c.thread_id == Thread.current[:thread_id]}.each do |conn|
-      #      conn.mutex.unlock if conn.mutex.locked?
-      #      conn.close
-      #      connections.delete(conn)
-      #  end
-      #end
+
     end
-    #def get_connection
-    #  acquired_connection = nil
-    #  self.synchronize do
-    #    if self[Thread.current[:qc_conn_id]].nil?
-    #      Thread.current[:qc_conn_id] = UUIDTools::UUID.random_create.to_str
-    #      self[Thread.current[:qc_conn_id]] = QC::Conn.connect
-    #      puts "#{self.length} QUEUE CLASSIC CONNECTIONS FOR PID #{Process.pid}"
-    #    end
-    #    acquired_connection = self[Thread.current[:qc_conn_id]]
-    #  end
-    #  return acquired_connection
-    #end
+
+    def add_connection_instance_property connection_instance, property_name, aliases = []
+      unless connection_instance.respond_to?(property_name) ||
+             aliases.select { |a| connection_instance.respond_to?(a)}.length > 0
+        property_code =  "def #{property_name}; "
+        property_code += "@#{property_name}; end; "
+        property_code += "def #{property_name}=(value); "
+        property_code += "@#{property_name}=value; end; "
+        connection_instance.class.class_eval(property_code)
+
+        aliases.each do |property_alias|
+          connection_instance.class.class_eval("alias :#{property_alias} :#{property_name}")
+        end
+      end
+    end
+
   end
 
   module Conn
@@ -98,10 +78,20 @@ module QC
         result = []
         r.each {|t| result << t}
         result.length > 1 ? result : result.pop
-      rescue PGError => e
-        log(:error => e.inspect)
-        disconnect
-        raise
+      rescue => exception
+        if exception.message.include?("no connection to the server")
+          # Attempt to reconnect ONCE.  If that doesn't work, fail.
+          connection.close if is_open?
+          begin
+            connection = connect
+          rescue => reconnect_exception
+            log(:error => e.inspect)
+            connection.close
+            raise "Postgres Database connection lost.  Reconnect failed: #{reconnect_exception.message}\n#{reconnect_exception.backtrace}"
+          end
+        else
+          raise exception
+        end
       end
     end
 
@@ -153,16 +143,19 @@ module QC
     end
 
     def finish
-      #connection.mutex.unlock
+      connection.finish
     end
 
     def cleanup
       #connections.cleanup
     end
 
+    def is_open?
+      !connection.finished?
+    end
+
     def disconnect
       connection.finish
-      #connection.mutex.unlock
     end
 
     def connect

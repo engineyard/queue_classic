@@ -21,5 +21,4 @@ Gem::Specification.new do |s|
 
   s.add_dependency "pg", "~> 0.14.1"
   s.add_dependency "scrolls", "~> 0.2.1"
-  s.add_dependency "uuidtools"
 end

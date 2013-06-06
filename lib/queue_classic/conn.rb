@@ -3,43 +3,34 @@ module QC
     attr_reader :connections, :connections_mutex
 
     def initialize
-      @connections = Array.new
+      @connections = Hash.new
       @connections_mutex = Mutex.new
     end
 
     def get_connection
-      acquired_connection = nil
-      found_connections = connections.select {|c|
-        c.owner_thread.object_id == Thread.current.object_id &&
-        c.finished? == false
-      }
-      if found_connections.length > 0
-        acquired_connection = found_connections.at(0)
-      else
-        acquired_connection = QC::Conn.connect
-        add_connection_instance_property acquired_connection, 'owner_thread'
-        acquired_connection.owner_thread = Thread.current
+      # If the connection has already been created for this thread and is open,
+      # just return it without locking.
+      unless @connections[Thread.current] &&
+        @connections[Thread.current].finished? == false
+          # If we're at this point, we have not yet secured an open connection.  Open
+          # a new one.
+          new_connection = QC::Conn.connect
 
-        @connections_mutex.synchronize do
-          i = connections.rindex {|conn| conn.owner_thread.nil? ||
-                                         conn.owner_thread.status.nil? ||
-                                         conn.owner_thread.status == false ||
-                                         conn.finished? == true}
-          if i.nil?
-            connections << acquired_connection
-          else
-            if connections[i].finished? == false
-              connections[i].finish
+          @connections_mutex.synchronize do
+            # Take this opportunity to clean up any connections associated with dead
+            # threads.
+            @connections.keys.each do |connection_thread|
+              if connection_thread.status.nil? ||
+                 connection_thread.status == false
+                @connections[connection_thread].finish if @connections[connection_thread].finished? == false
+                @connections.delete(connection_thread)
+              end
             end
-            connections[i] = acquired_connection
+            @connections[Thread.current] = new_connection
           end
-        end
       end
-      acquired_connection
-    end
-
-    def cleanup
-
+      # Return the connection that is specific for the thread
+      @connections[Thread.current]
     end
 
     def add_connection_instance_property connection_instance, property_name, aliases = []

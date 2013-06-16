@@ -61,6 +61,13 @@ module QC
       @connections
     end
 
+    def schema
+      unless @schema
+        QC::Conn.connect
+      end
+      @schema
+    end
+
     def execute(stmt, *params)
       log(:level => :debug, :action => "exec_sql", :sql => stmt.inspect)
       begin
@@ -159,13 +166,13 @@ module QC
         db_url.user,
         db_url.password
       )
-      schema  = db_url.query.to_s.split('&').detect { |k| k.match /schema=/ }.to_s.sub(/.*=/,'')
+      @schema  = db_url.query.to_s.split('&').detect { |k| k.match /schema=/ }.to_s.sub(/.*=/,'')
 
       if conn.status != PGconn::CONNECTION_OK
         log(:level => :error, :message => conn.error)
       end
 
-      conn.exec("SET search_path TO #{schema}") unless schema.nil? || schema == ""
+      conn.exec("SET search_path TO #{@schema}") unless @schema.nil? || @schema == ""
 
       conn
     end

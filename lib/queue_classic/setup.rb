@@ -20,7 +20,7 @@ module QC
 
     def drop_table
       Conn.transaction do
-        Conn.execute("DROP TABLE IF EXISTS queue_classic_jobs")
+        Conn.execute("DROP TABLE IF EXISTS #{"#{QC::Conn.schema}." if QC::Conn.schema}queue_classic_jobs")
       end
     end
 
